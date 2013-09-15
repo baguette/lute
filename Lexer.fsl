@@ -1,0 +1,118 @@
+{
+module Lexer
+
+open System
+open System.Text
+open Microsoft.FSharp.Text.Lexing   (* from the powerpack *)
+open System.Linq
+open Tokens
+
+let newline (lexbuf : LexBuffer<_>) =
+  lexbuf.EndPos <- lexbuf.EndPos.NextLine
+
+let lexeme (buf : LexBuffer<_>) = LexBuffer<_>.LexemeString buf
+
+let longlevel (str : string) =
+  Enumerable.Count (str, fun c -> c = '=')
+
+let opdelim lexbuf = function
+  | "+" -> PLUS    | "-" -> MINUS
+  | "*" -> TIMES   | "/" -> DIVIDE
+  | "%" -> MOD     | "^" -> HAT
+  | "#" -> HASH    | "=" -> ASSIGN
+  | "<" -> LT      | ">" -> GT
+  | "," -> COMMA   | ";" -> SEMICOLON
+  | "." -> DOT     | ":" -> COLON
+  | "(" -> LPAREN  | ")" -> RPAREN
+  | "{" -> LCURLY  | "}" -> RCURLY
+  | "[" -> LSQUARE | "]" -> RSQUARE
+  | lexeme -> sprintf "Invalid operator: %s" lexeme |> failwith
+
+let ident lexbuf = function
+  | "and"  -> AND  | "break"    -> BREAK
+  | "do"   -> DO   | "else"     -> ELSE
+  | "end"  -> END  | "elseif"   -> ELSEIF
+  | "for"  -> FOR  | "function" -> FUNCTION
+  | "if"   -> IF   | "local"    -> LOCAL
+  | "in"   -> IN   | "while"    -> WHILE
+  | "not"  -> NOT  | "repeat"   -> REPEAT
+  | "or"   -> OR   | "return"   -> RETURN
+  | "then" -> THEN | "until"    -> UNTIL
+  | "nil"  -> NIL
+  | "true" -> BOOLEAN true | "false" -> BOOLEAN false
+  | id     -> IDENTIFIER id
+
+}
+
+let whitespace = ' ' | '\t'
+let newline = '\n' | '\r' '\n'
+
+let opdelim = '+' | '-' | '*' | '/' | '%' | '^'
+            | '#' | '=' | '<' | '>' | ',' | ';'
+            | '.' | ':' | '(' | ')' | '{' | '}'
+            | '[' | ']'
+
+let digit = ['0'-'9']
+let float = ['-']?digit+'.'?(digit+)?(['e''E']digit+)?
+
+let alpha    = ['_' 'a'-'z' 'A'-'Z']
+let alphanum = ['_' 'a'-'z' 'A'-'Z' '0'-'9']
+let ident    = alpha alphanum*
+
+let quote = ['\'' '"']
+let longquote = '[' '='* '['
+let endlongquote = ']' '='* ']'
+
+let comment = '-''-'
+let linecom = comment _*
+let blockcom = comment longquote
+
+rule parsetokens = parse
+| whitespace { parsetokens lexbuf                   }
+| newline    { newline lexbuf;  parsetokens lexbuf  }
+(* This might need attention later.  I can't test
+   it properly with my current test harness...    *)
+| blockcom   { let sb = new StringBuilder(1000)
+               let  n = lexeme lexbuf |> longlevel
+               let  _ = parselongstr n sb lexbuf
+               parsetokens lexbuf                   }
+| linecom    { parsetokens lexbuf                   }
+| float      { NUMBER (Double.Parse(lexeme lexbuf)) }
+| opdelim    { opdelim lexbuf (lexeme lexbuf)       }
+| ident      { ident   lexbuf (lexeme lexbuf)       }
+| quote      { let sb = new StringBuilder(1000)
+               let tok = lexeme lexbuf
+               parsestr tok tok sb lexbuf           }
+| longquote  { let sb = new StringBuilder(1000)
+               let  n = lexeme lexbuf |> longlevel
+               parselongstr n sb lexbuf             }
+| eof        { EOF                                  }
+| _          { lexeme lexbuf
+               |> sprintf "unmatched token: %s"
+               |> failwith                          }
+
+and parsestr first last sb = parse
+| quote  { let tok = lexeme lexbuf
+           match last with
+           | "\\" ->
+             let _ = sb.Append(tok)
+             parsestr first tok sb lexbuf
+           | _ when first = tok ->
+             STRING (sb.ToString())
+           | _ ->
+             let _ = sb.Append(tok)
+             parsestr first tok sb lexbuf           }
+| _      { let _ = sb.Append(lexeme lexbuf)
+           parsestr first (lexeme lexbuf) sb lexbuf }
+| eof    { failwith "Unexpected EOF in string."     }
+
+and parselongstr n sb = parse
+| endlongquote { if longlevel (lexeme lexbuf) = n then
+                   STRING (sb.ToString())
+                 else
+                   let _ = sb.Append(lexeme lexbuf)
+                   parselongstr n sb lexbuf           }
+| _            { let _ = sb.Append(lexeme lexbuf)
+                 parselongstr n sb lexbuf             }
+| eof          { failwith "Unexpected EOF in string." }
+
